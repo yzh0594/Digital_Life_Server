@@ -4,7 +4,7 @@ import time
 
 
 class FlushingFileHandler(logging.FileHandler):
-    def __init__(self, filename, mode="a", encoding=None, delay=False, formatter=None):
+    def __init__(self, filename, mode="a", encoding="utf-8", delay=False, formatter=None):
         super().__init__(filename, mode, encoding, delay)
         self.formatter = formatter
     def emit(self, record):
@@ -16,5 +16,5 @@ class FlushingFileHandler(logging.FileHandler):
             self.nice_try(record)
 
     def nice_try(self, record):
-        with open('log_async.log', 'a') as f:
+        with open('log_async.log', 'a', encoding='utf-8') as f:
             f.write(self.formatter.format(record) + '\n')

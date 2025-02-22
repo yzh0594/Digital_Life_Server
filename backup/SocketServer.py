@@ -67,9 +67,9 @@ class Server():
 
         ## 预定义角色映射，每个角色包括模型配置文件路径、权重路径、名称和语速调整比例
         self.char_name = {
-            'paimon': ['TTS/models/paimon6k.json', 'TTS/models/paimon6k_390k.pth', 'character_paimon', 1.1],
-            'yunfei': ['TTS/models/paimon6k.json', 'TTS/models/paimon6k_390k.pth', 'character_yunfei', 1.1],
-            'catmaid': ['TTS/models/zhongli.json', 'TTS/models/zhongli_44k.pth', 'character_catmaid', 1.1]
+            'paimon': ['TTS/models/paimon6k.json', 'TTS/models/paimon6k_390k.pth', 'character_paimon', 1],
+            'yunfei': ['TTS/models/yunfeimix2.json', 'TTS/models/yunfeimix2_53k.pth', 'character_yunfei', 1.1],
+            'catmaid': ['TTS/models/catmix.json', 'TTS/models/catmix_107k.pth', 'character_catmaid', 1.2]
         }
 
         # 初始化 ASR 服务
@@ -91,38 +91,17 @@ class Server():
         while True:
             self.s.listen() # 开始监听连接
             logging.info(f"服务在监听： {self.host}:{self.port}...")
-            # 接受新连接
-            new_conn, new_addr = self.s.accept()
-            # 如果已经有现有连接，则关闭它
-            if self.conn is not None:
-                try:
-                    logging.info(f"检测到新连接 {new_addr}，断开旧连接 {self.addr}")
-                    self.conn.close()  # 关闭旧连接
-                except Exception as e:
-                    logging.error(f"关闭旧连接时出错: {e}")
-            # 更新当前连接和地址
-            self.conn = new_conn
-            self.addr = new_addr
-            logging.info(f"客户端连接建立： {self.addr}")  # 记录新连接
-        
-            # 每次接收到新连接时重置历史对话信息 
-            self.ollama.messages = [{ "role": "system", "content": self.ollama.tune }]
-            try:
-                self.conn.sendall(b'%s' % self.char_name[args.character][2].encode()) # 发送角色名称信息
-            except ConnectionResetError:
-                logging.error("客户端强制断开连接，无法发送角色名称信息。")
-                continue
+            self.conn, self.addr = self.s.accept()
+            logging.info(f"Connected by {self.addr}") # 接收客户端连接
+            self.conn.sendall(b'%s' % self.char_name[args.character][2].encode()) # 发送角色名称信息
             while True:
                 try:
                     # 接收文件
                     file = self.__receive_file()
-                    
-                    if not file or len(file) == 0:  # 判断文件内容为空
-                        logging.error("接收到的文件为空，无须处理。")
-                        break  # 返回空字符串或其他标志，表示没有有效的语音数据
+                    # print('file received: %s' % file)
                     with open(self.tmp_recv_file, 'wb') as f:
                         f.write(file)
-                        logging.info('接收到WAV 音频文件 并保存.')
+                        logging.info('WAV file received and saved.')
                     # 处理语音文件，转为文本
                     ask_text = self.process_voice()
                     # 根据是否启用流式处理，调用不同的服务
@@ -130,7 +109,7 @@ class Server():
                         for sentence in self.ollama.ask_stream(ask_text):
                             self.send_voice(sentence)
                         self.notice_stream_end()
-                        logging.info('流式回答完成.')
+                        logging.info('Stream finished.')
                     else:
                         resp_text = self.ollama.ask(ask_text)
                         self.send_voice(resp_text)
@@ -164,10 +143,7 @@ class Server():
         senddata += b'?!'
         senddata += b'%i' % senti
         # 发送音频和情感数据给客户端
-        try:
-            self.conn.sendall(senddata)
-        except ConnectionResetError:
-                logging.error("客户端强制断开连接，无法发送语音。")
+        self.conn.sendall(senddata)
         # 延时（为了防止网络阻塞和适配客户端）
         time.sleep(0.5)
         logging.info('WAV SENT, size %i' % len(senddata))
@@ -178,24 +154,16 @@ class Server():
         """
         file_data = b''
         while True:
-            try:
-                data = self.conn.recv(1024) # 每次接收1024字节
-                # print(data)
-                self.conn.send(b'sb') # 回传数据，表示接收成功
-                if data[-2:] == b'?!': # 检查是否到达文件末尾标志
-                    file_data += data[0:-2]
-                    break
-                if not data:
-                    # logging.info('Waiting for WAV...')
-                    continue
-                file_data += data
-            
-            except ConnectionResetError:
-                logging.error("客户端强制断开连接，文件接收失败。")
+            data = self.conn.recv(1024) # 每次接收1024字节
+            # print(data)
+            self.conn.send(b'sb') # 回传数据，表示接收成功
+            if data[-2:] == b'?!': # 检查是否到达文件末尾标志
+                file_data += data[0:-2]
                 break
-            except Exception as e:
-                logging.error(f"接收文件时发生错误: {e}")
-                break
+            if not data:
+                # logging.info('Waiting for WAV...')
+                continue
+            file_data += data
 
         return file_data
 
@@ -203,20 +171,13 @@ class Server():
         """
         填充 WAV 文件的大小信息，确保文件格式正确
         """
-        try:
-            file_size = os.path.getsize(self.tmp_recv_file)  # 获取文件的总大小
-            size = file_size - 8  # 减去头部偏移
-            if size < 0:
-                logging.warning(f"文件大小 ({file_size}) 小于 8 字节，无法修正 WAV 文件头部。")
-                return  # 如果文件大小小于 8，直接跳过修正
-            with open(self.tmp_recv_file, "r+b") as f:
-                f.seek(4)
-                f.write(size.to_bytes(4, byteorder='little')) # 写入总大小
-                f.seek(40)
-                f.write((size - 28).to_bytes(4, byteorder='little')) # 写入音频数据大小
-                f.flush()
-        except Exception as e:
-            logging.error(f"修正 WAV 文件大小时发生错误: {e}")
+        with open(self.tmp_recv_file, "r+b") as f:
+            size = os.path.getsize(self.tmp_recv_file) - 8  # 获取文件大小并减去头部偏移
+            f.seek(4)
+            f.write(size.to_bytes(4, byteorder='little')) # 写入总大小
+            f.seek(40)
+            f.write((size - 28).to_bytes(4, byteorder='little')) # 写入音频数据大小
+            f.flush()
 
     def process_voice(self):
         """
